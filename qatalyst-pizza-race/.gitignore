@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Benchmark output (regenerated per run, don't commit)
+engine/benchmarks.csv
+docs/benchmark-results/*.csv
+!docs/benchmark-results/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
