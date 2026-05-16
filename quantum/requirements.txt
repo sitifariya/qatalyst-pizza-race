@@ -1,0 +1,6 @@
+# Pinned versions known to work together (May 2026)
+qiskit>=1.2,<2.0
+qiskit-aer>=0.15
+qiskit-ionq>=0.5
+scipy>=1.11
+numpy>=1.26

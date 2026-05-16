@@ -1,0 +1,20 @@
+{
+  "stage_id": 0,
+  "route": [
+    1,
+    2,
+    0
+  ],
+  "backend": "ionq_simulator",
+  "energy": -387.6013847912889,
+  "valid_fraction": 0.0244140625,
+  "total_shots": 1024,
+  "timestamp_utc": "2026-05-16T19:50:03.077380+00:00",
+  "num_qubits": 9,
+  "encoding": "TSP one-hot, N*N variables, p=1 QAOA",
+  "customer_names": [
+    "Ria",
+    "Adam",
+    "Luna"
+  ]
+}
