@@ -1,0 +1,29 @@
+{
+  "stage_id": 2,
+  "route": [
+    0,
+    3,
+    1,
+    2
+  ],
+  "backend": "ionq_simulator",
+  "energy": -1087.3031412403516,
+  "valid_fraction": 0.00048828125,
+  "total_shots": 2048,
+  "timestamp_utc": "2026-05-18T20:35:41.363449+00:00",
+  "num_qubits": 16,
+  "qubo_size_terms": 100,
+  "encoding": "one-hot TSP, N*N variables, p=3 QAOA",
+  "customer_names": [
+    "Ria",
+    "Adam",
+    "Bee",
+    "Luna"
+  ],
+  "game_score": 250,
+  "game_hot": 3,
+  "game_cold": 1,
+  "fuel_used": 133.76,
+  "fuel_tank": 135.0,
+  "over_fuel": false
+}
