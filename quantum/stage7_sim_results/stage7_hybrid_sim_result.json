@@ -1,0 +1,85 @@
+{
+  "stage_id": "7_hybrid_sim",
+  "approach": "k-means + per-cluster QAOA (simulator-runnable 5+5 variant)",
+  "backend": "local",
+  "timestamp_utc": "2026-05-19T09:50:05.105507+00:00",
+  "p": 2,
+  "shots_per_cluster": 1024,
+  "clusters": {
+    "A": {
+      "customer_ids": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "size": 5,
+      "qubits": 25
+    },
+    "B": {
+      "customer_ids": [
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "size": 5,
+      "qubits": 25
+    }
+  },
+  "qaoa_energies": [
+    0.0,
+    0.0
+  ],
+  "valid_fractions": [
+    0.0,
+    0.0
+  ],
+  "hybrid_route": [
+    [
+      2,
+      3,
+      0,
+      1,
+      4
+    ],
+    [
+      9,
+      5,
+      7,
+      8,
+      6
+    ]
+  ],
+  "hybrid_score": 550.0,
+  "hybrid_hot": 7,
+  "hybrid_cold": 3,
+  "classical_sa": {
+    "n_restarts": 100,
+    "best": 550.0,
+    "mean": 437.5,
+    "worst": 400.0,
+    "stdev": 65.27912098338669,
+    "best_route": [
+      [
+        2,
+        3,
+        1
+      ],
+      [
+        9,
+        7,
+        8,
+        6,
+        5,
+        0,
+        4
+      ]
+    ]
+  },
+  "hybrid_wins_count": 75,
+  "hybrid_wins_or_ties": 100,
+  "note": "This is the laptop/cloud-runnable variant of Stage 7's hybrid pipeline. 5+5 customers (instead of 6+6) so 25 qubits per cluster fits all available simulators. Full 6+6 variant is at quantum/stage7_hybrid.py."
+}
