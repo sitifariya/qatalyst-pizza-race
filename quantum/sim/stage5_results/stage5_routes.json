@@ -1,0 +1,144 @@
+{
+  "stage_id": 5,
+  "generated_at": "2026-05-19T17:45:53.050999+00:00",
+  "confirmed_customers": [
+    {
+      "id": 0,
+      "name": "Ria",
+      "x": 220,
+      "y": 150,
+      "hotBy": 30
+    },
+    {
+      "id": 1,
+      "name": "Adam",
+      "x": 480,
+      "y": 150,
+      "hotBy": 30
+    },
+    {
+      "id": 2,
+      "name": "Luna",
+      "x": 250,
+      "y": 260,
+      "hotBy": 45
+    },
+    {
+      "id": 3,
+      "name": "Jay",
+      "x": 450,
+      "y": 260,
+      "hotBy": 45
+    },
+    {
+      "id": 4,
+      "name": "Bee",
+      "x": 350,
+      "y": 120,
+      "hotBy": 22
+    },
+    {
+      "id": 5,
+      "name": "Kai",
+      "x": 350,
+      "y": 290,
+      "hotBy": 50
+    }
+  ],
+  "maybe_customers": [
+    {
+      "id": 6,
+      "name": "Leo",
+      "x": 120,
+      "y": 200,
+      "hotBy": 45,
+      "prob": 0.7
+    },
+    {
+      "id": 7,
+      "name": "Zara",
+      "x": 580,
+      "y": 200,
+      "hotBy": 45,
+      "prob": 0.5
+    },
+    {
+      "id": 8,
+      "name": "Nia",
+      "x": 350,
+      "y": 340,
+      "hotBy": 60,
+      "prob": 0.3
+    }
+  ],
+  "scoring": {
+    "hot_reward": 100,
+    "cold_penalty": 50,
+    "missed_penalty": 150,
+    "fuel_rate": 0.5
+  },
+  "scenario_samples": 5000,
+  "routes": [
+    {
+      "label": "Cautious",
+      "description": "Visit only confirmed customers. Safe but misses possible orders.",
+      "route": [
+        0,
+        2,
+        5,
+        3,
+        1,
+        4
+      ],
+      "expected_score": -115.8,
+      "score_range": [
+        -339.5,
+        110.5
+      ],
+      "stdev": 121.7
+    },
+    {
+      "label": "Aggressive",
+      "description": "Visit everyone, optimize assuming all maybes order. High variance.",
+      "route": [
+        0,
+        6,
+        2,
+        5,
+        8,
+        3,
+        7,
+        1,
+        4
+      ],
+      "expected_score": 166.7,
+      "score_range": [
+        42.7,
+        292.7
+      ],
+      "stdev": 70.0
+    },
+    {
+      "label": "Smart",
+      "description": "Visit everyone, ordered to maximize expected score across scenarios.",
+      "route": [
+        4,
+        0,
+        2,
+        5,
+        8,
+        7,
+        6,
+        1,
+        3
+      ],
+      "expected_score": 180.0,
+      "score_range": [
+        109.7,
+        309.7
+      ],
+      "stdev": 58.2,
+      "method_note": "This route is the expected-value-optimal under stochastic customer arrival. It is what a quantum-future stochastic VRP solver (Chiew et al., IEEE TQE 2024; Ekstr\u00f8m et al., npj QI 2026) would naturally return via superposition sampling across scenarios."
+    }
+  ]
+}
