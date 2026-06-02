@@ -1,0 +1,20 @@
+{
+  "stage_id": 0,
+  "route": [
+    0,
+    2,
+    1
+  ],
+  "backend": "ionq_forte_enterprise_1",
+  "energy": -387.6013847912889,
+  "valid_fraction": 0.015609756097560976,
+  "total_shots": 1025,
+  "timestamp_utc": "2026-06-02T16:01:41.833401+00:00",
+  "num_qubits": 9,
+  "encoding": "TSP one-hot, N*N variables, p=1 QAOA",
+  "customer_names": [
+    "Ria",
+    "Adam",
+    "Luna"
+  ]
+}

@@ -5,19 +5,22 @@ Qatalyst Pizza Race - Stage 0 QAOA pipeline for IonQ hardware.
 
 This script formulates Stage 0 (3 customers, 1 van, no constraints) as a QUBO,
 builds a QAOA circuit, and runs it on three backends:
-  1. local Aer simulator  (free, instant)
-  2. IonQ ideal simulator (free, queue)
-  3. IonQ Forte hardware  (costs credits, queue)
+  1. local Aer simulator           (free, instant)
+  2. IonQ ideal simulator          (free, queue)
+  3. IonQ Forte hardware           (costs credits, queue, may be in maintenance)
+  4. IonQ Forte Enterprise 1       (costs credits, queue, current production)
 
 The output is a JSON cache file consumed by the game's stages.js (replacing the
 hardcoded cachedQuantum field for Stage 0 with a real hardware result).
 
 Usage:
-    python stage0_qaoa.py --backend local         # quick local test
-    python stage0_qaoa.py --backend ionq_sim      # free IonQ cloud simulator
-    python stage0_qaoa.py --backend ionq_forte    # real hardware (costs $$)
+    python stage0_qaoa.py --backend local             # quick local test
+    python stage0_qaoa.py --backend ionq_sim          # free IonQ cloud simulator
+    python stage0_qaoa.py --backend ionq_forte        # regular Forte (in maintenance until Jun 22, 2026)
+    python stage0_qaoa.py --backend ionq_forte_ent    # Forte Enterprise 1 (CURRENT)
+    python stage0_qaoa.py --backend ionq_aria         # Aria (older, cheaper)
 
-Requires IONQ_API_KEY env var for ionq_sim and ionq_forte backends.
+Requires IONQ_API_KEY env var for all ionq_* backends.
 """
 
 import os
@@ -239,9 +242,10 @@ def run_ionq(circuit, backend_name, shots=1024):
     """Submit to IonQ cloud (simulator or hardware).
 
     backend_name:
-      'simulator'   - free, ideal simulator
-      'qpu.forte'   - real Forte hardware (costs credits)
-      'qpu.aria-1'  - real Aria hardware (older, cheaper)
+      'simulator'              - free, ideal simulator
+      'qpu.forte'              - real Forte hardware (in maintenance until Jun 22, 2026)
+      'qpu.forte-enterprise-1' - real Forte Enterprise 1 hardware (CURRENT production)
+      'qpu.aria-1'             - real Aria hardware (older, cheaper)
     """
     try:
         from qiskit_ionq import IonQProvider
@@ -367,9 +371,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--backend",
-        choices=["local", "ionq_sim", "ionq_forte", "ionq_aria"],
+        choices=["local", "ionq_sim", "ionq_forte", "ionq_forte_ent", "ionq_aria"],
         default="local",
-        help="Where to run the final QAOA circuit",
+        help="Where to run the final QAOA circuit. "
+             "ionq_forte_ent = Forte Enterprise 1 (current production hardware).",
     )
     parser.add_argument("--p", type=int, default=1, help="QAOA depth (default 1)")
     parser.add_argument("--shots", type=int, default=1024)
@@ -427,6 +432,9 @@ def main():
     elif args.backend == "ionq_forte":
         counts = run_ionq(final_qc, "qpu.forte", shots=args.shots)
         backend_label = "ionq_forte"
+    elif args.backend == "ionq_forte_ent":
+        counts = run_ionq(final_qc, "qpu.forte-enterprise-1", shots=args.shots)
+        backend_label = "ionq_forte_enterprise_1"
     elif args.backend == "ionq_aria":
         counts = run_ionq(final_qc, "qpu.aria-1", shots=args.shots)
         backend_label = "ionq_aria"
