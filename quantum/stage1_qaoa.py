@@ -16,11 +16,19 @@ to keep the result consistent with what players see.
 Usage:
     python stage1_qaoa.py --backend local
     python stage1_qaoa.py --backend ionq_sim
-    python stage1_qaoa.py --backend ionq_forte
+    python stage1_qaoa.py --backend ionq_forte           # regular Forte (maintenance until Jun 22, 2026)
+    python stage1_qaoa.py --backend ionq_forte_ent       # Forte Enterprise 1 (CURRENT production)
 """
 import argparse
 import sys
 import os
+
+# Load .env so IONQ_API_KEY is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # Import shared utilities. Works either from this folder or one above.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -74,8 +82,9 @@ def build_stage1_qubo():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend",
-                        choices=["local", "ionq_sim", "ionq_aria", "ionq_forte"],
-                        default="local")
+                        choices=["local", "ionq_sim", "ionq_aria", "ionq_forte", "ionq_forte_ent"],
+                        default="local",
+                        help="ionq_forte_ent = Forte Enterprise 1 (current production hardware)")
     parser.add_argument("--p", type=int, default=2)
     parser.add_argument("--shots", type=int, default=1024)
     parser.add_argument("--max-iter", type=int, default=40)
@@ -136,6 +145,9 @@ def main():
     elif args.backend == "ionq_forte":
         counts = run_ionq(final_qc, "qpu.forte", shots=args.shots)
         backend_label = "ionq_forte"
+    elif args.backend == "ionq_forte_ent":
+        counts = run_ionq(final_qc, "qpu.forte-enterprise-1", shots=args.shots)
+        backend_label = "ionq_forte_enterprise_1"
 
     # Step 6: decode best valid route from samples
     route, energy, hits, total, valid_frac = best_valid_route_from_counts(

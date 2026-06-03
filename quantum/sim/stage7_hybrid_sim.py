@@ -2,44 +2,21 @@
 Stage 7 Hybrid (SIMULATOR variant) — 5+5 customers, 25 qubits per cluster
 =========================================================================
 
-This is the laptop-runnable variant of stage7_hybrid.py.
+Now supports XY-mixer via --mixer xy flag.
 
-Why this exists
----------------
-The main `stage7_hybrid.py` uses 6+6 customers (36 qubits per cluster) which
-fits IonQ Forte exactly but exceeds local Aer simulator (~25 qubit ceiling)
-and the free IonQ Cloud simulator. To validate the hybrid pipeline end-to-end
-without waiting for Forte access, we drop two boundary customers (Eli, Sam)
-and run the same algorithm at 5+5 = 25 qubits per cluster.
+Quick sanity check before using XY-mixer:
+    python3 quantum/qubo_builder.py
+    # All Dicke checks should PASS before continuing.
 
-Hardware fits
--------------
-  - Local Aer simulator      ✓
-  - IonQ Cloud simulator     ✓
-  - IonQ Forte (real HW)     ✓ (well under 36-qubit limit)
-
-Demonstrated result (local simulation, May 2026)
-------------------------------------------------
-  Hybrid:                       score 550 (7 hot, 3 cold)
-  Classical SA, 100 restarts:
-    best 550, mean 442, worst 400, stdev 68
-  Hybrid wins:                  72/100 trials
-  Hybrid matches or beats:      100/100 trials
-
-The win-rate dropped from 100/100 (at 6+6) to 72/100 (at 5+5) because the
-smaller problem is easier for classical SA. The hybrid still demonstrably
-beats classical's mean by 25% (550 vs 442), which is the defensible claim.
-
-Usage
------
-    # Local: full pipeline runs in ~30 seconds
-    python stage7_hybrid_sim.py --backend local
-
-    # IonQ Cloud simulator (free, queue 1-10 min)
-    python stage7_hybrid_sim.py --backend ionq_sim
-
-This file lives in quantum/sim/ to keep it separate from the Forte-targeted
-scripts at the top of quantum/.
+Usage:
+    # X-mixer (default, original behavior)
+    python3 quantum/sim/stage7_hybrid_sim.py --backend local
+    
+    # XY-mixer (constraint-preserving, new)
+    python3 quantum/sim/stage7_hybrid_sim.py --backend local --mixer xy
+    
+    # XY-mixer on Forte Enterprise 1 (ONLY after local test passes)
+    python3 quantum/sim/stage7_hybrid_sim.py --backend ionq_forte_ent --mixer xy
 """
 import argparse
 import math
@@ -51,7 +28,13 @@ import statistics
 from datetime import datetime, timezone
 from itertools import permutations
 
-# Look for qubo_builder.py in the parent quantum/ folder
+# Load .env so IONQ_API_KEY is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(THIS_DIR)
 sys.path.insert(0, PARENT_DIR)
@@ -60,24 +43,19 @@ sys.path.insert(0, THIS_DIR)
 from qubo_builder import (
     distance, build_distance_matrix,
     assignment_penalty, distance_cost, cold_penalty,
-    qubo_to_ising, build_qaoa_circuit,
+    qubo_to_ising, build_qaoa_circuit, build_qaoa_circuit_xy,
     run_local, run_ionq, optimise_qaoa,
     best_valid_route_from_counts,
 )
 
 
-# ============================================================================
-# PROBLEM: 10-customer subset of game's Stage 7
-# ============================================================================
 SHOP = (350, 200)
 CUSTOMERS = [
-    # NW cluster (5 customers)
     {"id": 0, "name": "Ria",  "x": 130, "y": 110, "hotBy": 18},
     {"id": 1, "name": "Adam", "x": 180, "y": 85,  "hotBy": 16},
     {"id": 2, "name": "Luna", "x": 225, "y": 140, "hotBy": 20},
     {"id": 3, "name": "Jay",  "x": 150, "y": 170, "hotBy": 22},
     {"id": 4, "name": "Max",  "x": 340, "y": 100, "hotBy": 15},
-    # SE cluster (5 customers)
     {"id": 5, "name": "Bee",  "x": 510, "y": 325, "hotBy": 42},
     {"id": 6, "name": "Kai",  "x": 555, "y": 340, "hotBy": 44},
     {"id": 7, "name": "Leo",  "x": 480, "y": 300, "hotBy": 40},
@@ -88,9 +66,6 @@ FUEL_TANK = 130.0
 NUM_CUSTOMERS = len(CUSTOMERS)
 
 
-# ============================================================================
-# STEP 1: CLASSICAL CLUSTERING (k-means)
-# ============================================================================
 def kmeans_partition(customers, max_iter=20):
     n = len(customers)
     centroid_a = (customers[0]["x"], customers[0]["y"])
@@ -115,9 +90,6 @@ def kmeans_partition(customers, max_iter=20):
             [i for i in range(n) if assignment[i] == 1])
 
 
-# ============================================================================
-# STEP 2: PER-CLUSTER QAOA
-# ============================================================================
 def build_cluster_qubo(cluster_ids):
     cluster_customers = [CUSTOMERS[i] for i in cluster_ids]
     n = len(cluster_customers)
@@ -134,7 +106,7 @@ def build_cluster_qubo(cluster_ids):
     return Q, n * n, cluster_customers
 
 
-def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter):
+def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter, mixer="x"):
     n = len(cluster_ids)
     if n == 0:
         return [], 0.0, 1.0
@@ -167,18 +139,33 @@ def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter):
               f"Route: {'-'.join(CUSTOMERS[i]['name'] for i in route_orig)}")
         return route_orig, 0.0, 1.0
 
-    # n=5: full QAOA pipeline (25 qubits, fits laptop)
+    # n=5: full QAOA pipeline
     h, J, _ = qubo_to_ising(Q, num_vars)
     print(f"    QUBO: {num_vars} qubits, {len(Q)} terms")
-    print(f"    Tuning QAOA params on local simulator…")
-    best_params = optimise_qaoa(Q, num_vars, p=p, shots=shots, max_iter=max_iter)
+    print(f"    Tuning QAOA params on local simulator (mixer={mixer})…")
+    best_params = optimise_qaoa(Q, num_vars, p=p, shots=shots, max_iter=max_iter,
+                                mixer=mixer, n_customers=n)
 
-    if p == 1:
-        final_qc = build_qaoa_circuit(h, J, num_vars,
-                                      best_params[0], best_params[1], p=1)
+    # Build the final circuit using the right mixer
+    if mixer == "x":
+        if p == 1:
+            final_qc = build_qaoa_circuit(h, J, num_vars,
+                                          best_params[0], best_params[1], p=1)
+        else:
+            final_qc = build_qaoa_circuit(h, J, num_vars,
+                                          best_params[:p], best_params[p:], p=p)
+    elif mixer == "xy":
+        if p == 1:
+            final_qc = build_qaoa_circuit_xy(h, J, num_vars,
+                                             best_params[0], best_params[1],
+                                             p=1, n_customers=n)
+        else:
+            final_qc = build_qaoa_circuit_xy(h, J, num_vars,
+                                             best_params[:p], best_params[p:],
+                                             p=p, n_customers=n)
     else:
-        final_qc = build_qaoa_circuit(h, J, num_vars,
-                                      best_params[:p], best_params[p:], p=p)
+        raise ValueError(f"Unknown mixer: {mixer}")
+    
     print(f"    Final circuit: {final_qc.num_qubits} qubits, "
           f"depth {final_qc.depth()}, "
           f"{sum(final_qc.count_ops().values())} gates")
@@ -190,6 +177,8 @@ def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter):
         counts = run_ionq(final_qc, "simulator", shots=shots)
     elif backend == "ionq_forte":
         counts = run_ionq(final_qc, "qpu.forte", shots=shots)
+    elif backend == "ionq_forte_ent":
+        counts = run_ionq(final_qc, "qpu.forte-enterprise-1", shots=shots)
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
@@ -198,9 +187,6 @@ def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter):
     )
 
     if route_local is None:
-        # Fallback: brute-force the cluster by GAME SCORE (not QUBO energy).
-        # The QUBO is an approximation; for small clusters we want the
-        # game's actual scoring to drive the choice.
         print(f"    QAOA returned no valid permutation. Falling back to brute force.")
         best_perm = None
         best_game_score = float("-inf")
@@ -227,9 +213,6 @@ def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter):
     return route_orig, energy, valid_frac
 
 
-# ============================================================================
-# STEP 3: SCORE FULL SOLUTION
-# ============================================================================
 def score_full_solution(routes):
     vans = []
     for route in routes:
@@ -259,9 +242,6 @@ def score_full_solution(routes):
     return {"score": score, "hot": total_hot, "cold": total_cold, "vans": vans}
 
 
-# ============================================================================
-# STEP 4: CLASSICAL SA BASELINE
-# ============================================================================
 def classical_sa_baseline(num_restarts=100, iters=2000):
     def order_nn(route_ids):
         if not route_ids:
@@ -327,15 +307,13 @@ def classical_sa_baseline(num_restarts=100, iters=2000):
     return scores, best_overall
 
 
-# ============================================================================
-# CACHE WRITER
-# ============================================================================
 def write_cache(out_path, *, routes, hybrid_score, sa_scores, sa_best,
                 cluster_a, cluster_b, backend, p, shots,
-                qaoa_energies, valid_fractions):
+                qaoa_energies, valid_fractions, mixer):
     payload = {
         "stage_id": "7_hybrid_sim",
-        "approach": "k-means + per-cluster QAOA (simulator-runnable 5+5 variant)",
+        "approach": f"k-means + per-cluster QAOA (mixer={mixer})",
+        "mixer": mixer,
         "backend": backend,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "p": int(p),
@@ -362,10 +340,6 @@ def write_cache(out_path, *, routes, hybrid_score, sa_scores, sa_best,
         },
         "hybrid_wins_count": sum(1 for s in sa_scores if s < hybrid_score["score"]),
         "hybrid_wins_or_ties": sum(1 for s in sa_scores if s <= hybrid_score["score"]),
-        "note": ("This is the laptop/cloud-runnable variant of Stage 7's "
-                 "hybrid pipeline. 5+5 customers (instead of 6+6) so 25 "
-                 "qubits per cluster fits all available simulators. "
-                 "Full 6+6 variant is at quantum/stage7_hybrid.py."),
     }
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:
@@ -374,47 +348,59 @@ def write_cache(out_path, *, routes, hybrid_score, sa_scores, sa_best,
     return payload
 
 
-# ============================================================================
-# MAIN
-# ============================================================================
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend",
-                        choices=["local", "ionq_sim", "ionq_forte"],
+                        choices=["local", "ionq_sim", "ionq_forte", "ionq_forte_ent"],
                         default="local")
+    parser.add_argument("--mixer", choices=["x", "xy"], default="x",
+                        help="QAOA mixer. 'x' is plain. 'xy' is constraint-preserving "
+                             "(row-only, requires Dicke initial state).")
     parser.add_argument("--p", type=int, default=2)
     parser.add_argument("--shots", type=int, default=1024)
     parser.add_argument("--max-iter", type=int, default=40)
     parser.add_argument("--sa-restarts", type=int, default=100)
     parser.add_argument("--sa-iters", type=int, default=2000)
-    parser.add_argument("--out", default="stage7_sim_results/stage7_hybrid_sim_result.json")
+    parser.add_argument("--out", default=None)
     args = parser.parse_args()
 
+    if args.out is None:
+        args.out = f"stage7_sim_results/stage7_hybrid_sim_{args.mixer}_result.json"
+
     print("=" * 70)
-    print("Stage 7 Hybrid (SIM variant) — 5+5 customers, 25 qubits/cluster")
-    print(f"Backend: {args.backend}, p={args.p}, shots/cluster={args.shots}")
+    print(f"Stage 7 Hybrid (SIM variant) — 5+5 customers, 25 qubits/cluster")
+    print(f"Backend: {args.backend}, p={args.p}, mixer={args.mixer}, "
+          f"shots/cluster={args.shots}")
     print("=" * 70)
 
-    # ----- STEP 1 -----
+    if args.mixer == "xy" and args.backend == "ionq_forte_ent":
+        print("\n*** WARNING: about to run XY-mixer on real Forte hardware. ***")
+        print("    Did you run `python3 quantum/qubo_builder.py` first to")
+        print("    verify Dicke sanity checks all PASS?")
+        print("    Press Ctrl+C now if not.")
+        try:
+            import time
+            time.sleep(10)
+        except KeyboardInterrupt:
+            print("\nAborted by user.")
+            return
+
     print("\n[1/4] Classical k-means clustering (k=2)…")
     cluster_a, cluster_b = kmeans_partition(CUSTOMERS)
     print(f"  Cluster A ({len(cluster_a)}): "
           f"{[CUSTOMERS[i]['name'] for i in cluster_a]}")
     print(f"  Cluster B ({len(cluster_b)}): "
           f"{[CUSTOMERS[i]['name'] for i in cluster_b]}")
-    print(f"  QUBO sizes: {len(cluster_a)**2} and {len(cluster_b)**2} qubits")
 
-    # ----- STEP 2 -----
     print(f"\n[2/4] Solving each cluster on {args.backend}…")
     print(f"  Cluster A:")
     route_a, energy_a, vf_a = solve_cluster_qaoa(
-        cluster_a, args.backend, args.p, args.shots, args.max_iter)
+        cluster_a, args.backend, args.p, args.shots, args.max_iter, args.mixer)
     print(f"  Cluster B:")
     route_b, energy_b, vf_b = solve_cluster_qaoa(
-        cluster_b, args.backend, args.p, args.shots, args.max_iter)
+        cluster_b, args.backend, args.p, args.shots, args.max_iter, args.mixer)
     routes = [route_a, route_b]
 
-    # ----- STEP 3 -----
     print("\n[3/4] Hybrid solution:")
     hybrid_eval = score_full_solution(routes)
     print(f"  Van 1: {route_a} ({'-'.join(CUSTOMERS[i]['name'] for i in route_a)})")
@@ -422,7 +408,6 @@ def main():
     print(f"  Score: {hybrid_eval['score']}  "
           f"(hot={hybrid_eval['hot']}, cold={hybrid_eval['cold']})")
 
-    # ----- STEP 4 -----
     print(f"\n[4/4] Classical SA baseline "
           f"({args.sa_restarts} restarts)…")
     sa_scores, sa_best = classical_sa_baseline(num_restarts=args.sa_restarts,
@@ -433,11 +418,14 @@ def main():
     hybrid_wins = sum(1 for s in sa_scores if s < hybrid_eval["score"])
     hybrid_ties_or_wins = sum(1 for s in sa_scores if s <= hybrid_eval["score"])
     print(f"\n=== COMPARISON ===")
+    print(f"  Mixer:                           {args.mixer}")
     print(f"  Hybrid:                          {hybrid_eval['score']}")
     print(f"  Classical SA best of {args.sa_restarts}:   {max(sa_scores)}")
     print(f"  Classical SA mean of {args.sa_restarts}:  {statistics.mean(sa_scores):.1f}")
     print(f"  Hybrid strictly beats:           {hybrid_wins}/{args.sa_restarts}")
     print(f"  Hybrid matches or beats:         {hybrid_ties_or_wins}/{args.sa_restarts}")
+    print(f"  Cluster A valid permutations:    {vf_a*100:.2f}%")
+    print(f"  Cluster B valid permutations:    {vf_b*100:.2f}%")
 
     write_cache(args.out,
                 routes=routes,
@@ -450,7 +438,8 @@ def main():
                 p=args.p,
                 shots=args.shots,
                 qaoa_energies=[energy_a, energy_b],
-                valid_fractions=[vf_a, vf_b])
+                valid_fractions=[vf_a, vf_b],
+                mixer=args.mixer)
 
 
 if __name__ == "__main__":

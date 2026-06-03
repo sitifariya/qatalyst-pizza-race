@@ -1,0 +1,85 @@
+{
+  "stage_id": "7_hybrid_sim",
+  "approach": "k-means + per-cluster QAOA (mixer=xy)",
+  "mixer": "xy",
+  "backend": "local",
+  "timestamp_utc": "2026-06-02T21:38:47.386452+00:00",
+  "p": 3,
+  "shots_per_cluster": 8192,
+  "clusters": {
+    "A": {
+      "customer_ids": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "size": 5,
+      "qubits": 25
+    },
+    "B": {
+      "customer_ids": [
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "size": 5,
+      "qubits": 25
+    }
+  },
+  "qaoa_energies": [
+    -700.6533853365426,
+    -833.7687087739642
+  ],
+  "valid_fractions": [
+    0.0452880859375,
+    0.04541015625
+  ],
+  "hybrid_route": [
+    [
+      4,
+      1,
+      0,
+      3,
+      2
+    ],
+    [
+      8,
+      6,
+      5,
+      7,
+      9
+    ]
+  ],
+  "hybrid_score": 250.0,
+  "hybrid_hot": 5,
+  "hybrid_cold": 5,
+  "classical_sa": {
+    "n_restarts": 100,
+    "best": 550.0,
+    "mean": 437.5,
+    "worst": 400.0,
+    "stdev": 65.27912098338669,
+    "best_route": [
+      [
+        2,
+        3,
+        1
+      ],
+      [
+        9,
+        7,
+        8,
+        6,
+        5,
+        0,
+        4
+      ]
+    ]
+  },
+  "hybrid_wins_count": 0,
+  "hybrid_wins_or_ties": 0
+}
