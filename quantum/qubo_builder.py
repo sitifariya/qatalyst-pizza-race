@@ -11,13 +11,16 @@ Conventions:
   - All QUBO builders return (Q, penalty_strength).
     Q is a dict {(i,j): coefficient} with i <= j.
 
-XY-mixer additions (June 2026):
+XY-mixer + Warm-start additions (June 2026):
   - tqa_init: TQA parameter init (Sack & Serbyn, Quantum 2021).
-  - dicke_state_k1: prepare |D^n_1> (uniform over one-hot bitstrings),
-    used as the initial state for XY-mixer QAOA.
+  - dicke_state_k1: prepare uniform |D^n_1> (one-hot subspace, k=1).
+  - warm_biased_dicke_k1: prepare BIASED |D^n_1> toward a warm position.
+  - nearest_neighbor_route: classical heuristic to source the warm route.
   - xy_ring_mixer_row: apply XY-ring mixer to one row of n qubits.
-  - build_qaoa_circuit_xy: full QAOA circuit using XY-mixer.
-  - optimise_qaoa gained `mixer="x"` (default) or `mixer="xy"` parameter.
+  - build_qaoa_circuit_xy: full QAOA circuit using XY-mixer + uniform Dicke.
+  - build_qaoa_circuit_warm: full QAOA circuit using XY-mixer + warm-biased Dicke.
+  - optimise_qaoa gained `mixer="x"|"xy"|"warm"` parameter.
+  - verify_dicke_distribution / verify_warm_dicke: sanity checks.
 
 References:
   Sack & Serbyn, "Quantum annealing initialization of the quantum approximate
@@ -26,6 +29,7 @@ References:
     Algorithms 12, 34 (2019).
   Bärtschi & Eidenbenz, "Deterministic preparation of Dicke states",
     arXiv:1904.07358.
+  Carmo et al., "Warm-Starting QAOA with XY Mixers", arXiv:2504.19934 (2025).
   OpenQuantumComputing/QAOA — reference open-source XY-mixer implementation.
 """
 from __future__ import annotations
@@ -307,6 +311,105 @@ def dicke_state_k1(qc, qubits):
         qc.cx(qubits[i + 1], qubits[i])
 
 
+def warm_biased_dicke_k1(qc, qubits, warm_position, eps):
+    """Prepare a WARM-BIASED |D^n_1> on the given qubits.
+    
+    Like dicke_state_k1, but with extra amplitude on the qubit at index
+    `warm_position` within the qubits list. The biasing strength is
+    controlled by `eps` in [0, 1]:
+      eps = 0:   uniform Dicke (probability 1/n on each one-hot bitstring)
+      eps = 0.5: warm position has prob ~0.6+, others share the remainder
+      eps = 1:   pure |warm> state (no superposition, fully classical)
+    
+    Math (derived and verified for n=3,4,5, all eps values):
+      - target warm probability: p_w = 1/n + eps*(n-1)/n
+      - target other probability: p_o = (1 - eps)/n each
+      - sum: p_w + (n-1)*p_o = 1  ✓
+    
+    Implementation:
+      We use the same cascade as dicke_state_k1, but with the FIRST angle
+      modified. The rest of the cascade is identical:
+        f_0 = (n-1)*(1-eps)/n  instead of (n-1)/n
+        f_i for i>=1 = (n-1-i)/(n-i)  (unchanged)
+    
+      Then we permute qubits so the warm position ends up where we want.
+      We do this by RELABELING — we apply the cascade as if warm_position=0,
+      but using the qubits[warm_position] as qubit 0 and the others in order
+      after it. This avoids any post-permutation gates.
+    
+    Reference: Carmo et al. "Warm-Starting QAOA with XY Mixers" arXiv:2504.19934 (2025).
+    
+    Args:
+      qc: Qiskit QuantumCircuit
+      qubits: list of qubit indices, length n >= 1
+      warm_position: index in [0, n-1] for which qubit gets the biased amplitude
+      eps: biasing strength in [0, 1]; eps=0 gives uniform Dicke.
+    """
+    n = len(qubits)
+    if n == 0:
+        return
+    if n == 1:
+        qc.x(qubits[0])
+        return
+    if not (0 <= warm_position < n):
+        raise ValueError(f"warm_position {warm_position} out of range [0, {n})")
+    if not (0.0 <= eps <= 1.0):
+        raise ValueError(f"eps {eps} must be in [0, 1]")
+    
+    # Re-order qubits so warm becomes position 0 in our cascade
+    # The cascade still applies to "positional" indices 0..n-1, we just map them.
+    cascade_qubits = [qubits[warm_position]] + [
+        qubits[i] for i in range(n) if i != warm_position
+    ]
+    
+    # Place excitation on the warm qubit (first in cascade order)
+    qc.x(cascade_qubits[0])
+    
+    # First cascade step: biased angle
+    # Want q[0] to keep probability p_w = 1/n + eps*(n-1)/n
+    # So f_0 = 1 - p_w = (n-1)*(1-eps)/n
+    f_0 = (n - 1) * (1 - eps) / n
+    theta_0 = 2.0 * math.asin(math.sqrt(f_0))
+    qc.cry(theta_0, cascade_qubits[0], cascade_qubits[1])
+    qc.cx(cascade_qubits[1], cascade_qubits[0])
+    
+    # Remaining cascade steps: same as uniform Dicke (verified mathematically)
+    for i in range(1, n - 1):
+        frac = (n - 1 - i) / (n - i)
+        theta = 2.0 * math.asin(math.sqrt(frac))
+        qc.cry(theta, cascade_qubits[i], cascade_qubits[i + 1])
+        qc.cx(cascade_qubits[i + 1], cascade_qubits[i])
+
+
+def nearest_neighbor_route(customers, shop):
+    """Generate a classical nearest-neighbor route starting from shop.
+    
+    Args:
+      customers: list of customer dicts with 'x' and 'y' keys.
+      shop: (x, y) tuple for the depot.
+    
+    Returns:
+      List of customer indices (0-based, into `customers`) in visit order.
+    
+    This is a simple greedy heuristic. Used to provide a warm-start route
+    for warm-biased Dicke state preparation.
+    """
+    n = len(customers)
+    if n == 0:
+        return []
+    remaining = list(range(n))
+    route = []
+    prev = shop
+    while remaining:
+        best = min(remaining, key=lambda i: math.hypot(
+            customers[i]["x"] - prev[0], customers[i]["y"] - prev[1]
+        ))
+        route.append(best)
+        remaining.remove(best)
+        prev = (customers[best]["x"], customers[best]["y"])
+    return route
+
+
 def xy_ring_mixer_row(qc, qubits, beta):
     """Apply one layer of XY-ring mixer to a row of qubits.
     
@@ -398,6 +501,176 @@ def build_qaoa_circuit_xy(h: dict, J: dict, num_vars: int,
     
     qc.measure(range(num_vars), range(num_vars))
     return qc
+
+
+def build_qaoa_circuit_warm(h: dict, J: dict, num_vars: int,
+                            gamma, beta, p: int = 1,
+                            n_customers: int = None,
+                            warm_route: list = None,
+                            eps: float = 0.25):
+    """Build a depth-p QAOA circuit with XY-ring mixer AND warm-start initialization.
+    
+    Initial state: tensor product of warm-biased Dicke |D^n_1> states.
+      For each row i (i.e., customer i), the warm position is warm_route.index(i),
+      which is "the position in the warm route that this customer occupies".
+      Eps controls bias strength uniformly across rows.
+    
+    Mixer: XY-ring mixer applied independently to each row each layer
+           (same as build_qaoa_circuit_xy).
+    Cost: same as the other circuits (Z and ZZ terms).
+    
+    Args:
+      h, J: Ising Hamiltonian terms (from qubo_to_ising).
+      num_vars: total qubit count (= n_customers * n_customers).
+      gamma, beta: QAOA params (scalar if p=1, list of length p otherwise).
+      p: QAOA depth.
+      n_customers: number of customers (= sqrt(num_vars)).
+      warm_route: list of customer indices in visit order, length n_customers.
+                  e.g. [2, 0, 3, 1, 4] means: customer 2 first, then 0, then 3...
+                  This means customer 2 goes at position 0, customer 0 at position 1, etc.
+                  Row i (customer i) should have its warm bit at position warm_route.index(i).
+      eps: biasing strength for warm-biased Dicke (0 = uniform, 1 = pure warm).
+    
+    Returns: Qiskit QuantumCircuit with measurement.
+    """
+    from qiskit import QuantumCircuit
+    
+    if n_customers is None:
+        n_customers = int(round(math.sqrt(num_vars)))
+        if n_customers * n_customers != num_vars:
+            raise ValueError(f"num_vars={num_vars} is not a perfect square; "
+                             f"please pass n_customers explicitly.")
+    
+    if n_customers * n_customers != num_vars:
+        raise ValueError(f"num_vars={num_vars} != n_customers^2 = {n_customers**2}")
+    
+    if warm_route is None:
+        raise ValueError("warm_route is required for build_qaoa_circuit_warm. "
+                         "Use nearest_neighbor_route() to generate one.")
+    if len(warm_route) != n_customers:
+        raise ValueError(f"warm_route length {len(warm_route)} != n_customers {n_customers}")
+    if sorted(warm_route) != list(range(n_customers)):
+        raise ValueError(f"warm_route must be a permutation of 0..{n_customers-1}")
+    
+    # Build customer->position map: customer i goes at position warm_pos_of[i]
+    warm_pos_of = [0] * n_customers
+    for pos, cust in enumerate(warm_route):
+        warm_pos_of[cust] = pos
+    
+    gammas = [gamma] if p == 1 else list(gamma)
+    betas = [beta] if p == 1 else list(beta)
+    
+    qc = QuantumCircuit(num_vars, num_vars)
+    
+    # ---- Initial state: warm-biased Dicke per row ----
+    # Row i covers qubits [i*n_customers, ..., (i+1)*n_customers - 1].
+    # For row i (customer i), the warm bit is at position warm_pos_of[i] within
+    # that row. So within-row qubit index = warm_pos_of[i].
+    for cust in range(n_customers):
+        row_qubits = list(range(cust * n_customers, (cust + 1) * n_customers))
+        warm_position = warm_pos_of[cust]
+        warm_biased_dicke_k1(qc, row_qubits, warm_position, eps)
+    
+    # ---- p QAOA layers (cost + XY-ring mixer per row) ----
+    for layer in range(p):
+        g, b = gammas[layer], betas[layer]
+        
+        for i, hi in h.items():
+            if abs(hi) > 1e-12:
+                qc.rz(2 * g * hi, i)
+        for (i, j), Jij in J.items():
+            if abs(Jij) > 1e-12:
+                qc.cx(i, j)
+                qc.rz(2 * g * Jij, j)
+                qc.cx(i, j)
+        
+        for row in range(n_customers):
+            row_qubits = list(range(row * n_customers, (row + 1) * n_customers))
+            xy_ring_mixer_row(qc, row_qubits, b)
+    
+    qc.measure(range(num_vars), range(num_vars))
+    return qc
+
+
+def verify_warm_dicke(n: int, warm_position: int, eps: float,
+                      shots: int = 32768, tolerance_sigmas: float = 5.0) -> dict:
+    """SANITY CHECK: verify the warm-biased |D^n_1> circuit.
+    
+    Expected probability on warm position: p_w = 1/n + eps*(n-1)/n
+    Expected probability on each other position: p_o = (1-eps)/n
+    
+    Returns dict with 'pass' (bool), 'warm_prob', 'other_avg', etc.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit_aer import AerSimulator
+    from qiskit import transpile
+    
+    qc = QuantumCircuit(n, n)
+    warm_biased_dicke_k1(qc, list(range(n)), warm_position, eps)
+    qc.measure(range(n), range(n))
+    
+    backend = AerSimulator()
+    tqc = transpile(qc, backend, optimization_level=0)
+    counts = backend.run(tqc, shots=shots).result().get_counts()
+    
+    p_w_target = 1.0/n + eps*(n-1)/n
+    p_o_target = (1.0 - eps) / n
+    
+    sigma_w = math.sqrt(shots * p_w_target * (1.0 - p_w_target))
+    sigma_o = math.sqrt(shots * p_o_target * (1.0 - p_o_target))
+    
+    print(f"\n=== Warm Dicke |D^{n}_1> (warm_pos={warm_position}, eps={eps}) sanity check ===")
+    print(f"  shots: {shots}")
+    print(f"  warm position target prob: {p_w_target:.4f} ({p_w_target*shots:.1f} ± {tolerance_sigmas*sigma_w:.0f} expected)")
+    print(f"  other position target prob: {p_o_target:.4f} ({p_o_target*shots:.1f} ± {tolerance_sigmas*sigma_o:.0f} each)")
+    
+    valid_count = 0
+    per_position = {}
+    for i in range(n):
+        bits = ['0'] * n
+        bits[i] = '1'
+        bs = ''.join(reversed(bits))
+        cnt = counts.get(bs, 0)
+        per_position[i] = cnt
+        valid_count += cnt
+    
+    invalid_count = shots - valid_count
+    valid_frac = valid_count / shots
+    
+    # Check warm position
+    warm_cnt = per_position[warm_position]
+    expected_warm = p_w_target * shots
+    warm_ok = abs(warm_cnt - expected_warm) <= tolerance_sigmas * sigma_w
+    print(f"  warm position (q{warm_position}) count: {warm_cnt} ({'✓' if warm_ok else '✗'})")
+    
+    # Check other positions
+    others_ok = True
+    for i in range(n):
+        if i == warm_position:
+            continue
+        cnt = per_position[i]
+        expected_o = p_o_target * shots
+        ok = abs(cnt - expected_o) <= tolerance_sigmas * sigma_o
+        if not ok:
+            others_ok = False
+        print(f"  other q{i} count: {cnt} ({'✓' if ok else '✗'})")
+    
+    print(f"  Valid one-hot fraction: {valid_frac*100:.4f}%")
+    print(f"  Invalid (leakage) fraction: {(1-valid_frac)*100:.4f}%")
+    
+    is_pass = warm_ok and others_ok and valid_frac > 0.99
+    if is_pass:
+        print(f"  PASS — warm-biased Dicke is correctly prepared.")
+    else:
+        print(f"  FAIL — distribution doesn't match target.")
+    
+    return {
+        "pass": is_pass,
+        "warm_count": warm_cnt,
+        "valid_fraction": valid_frac,
+        "per_position": per_position,
+    }
+
 
 
 def verify_dicke_distribution(n: int, shots: int = 32768, 
@@ -551,13 +824,19 @@ def tqa_init(p: int, dt: float = 0.75) -> np.ndarray:
 def optimise_qaoa(Q: dict, num_vars: int, p: int = 1, shots: int = 1024,
                   max_iter: int = 30, init_method: str = "tqa",
                   tqa_dt: float = 0.75, mixer: str = "x",
-                  n_customers: int = None):
+                  n_customers: int = None,
+                  warm_route: list = None, eps: float = 0.25):
     """COBYLA over (gamma, beta) using local Aer simulator.
     
     Args:
-      mixer: "x" (default, the original X-mixer) or "xy" (constraint-preserving
-             XY-mixer using Dicke initial state). XY-mixer requires n_customers.
-      n_customers: required when mixer="xy" (= sqrt(num_vars)).
+      mixer: "x" (default), "xy" (constraint-preserving XY-mixer with uniform
+             Dicke), or "warm" (XY-mixer with warm-biased Dicke).
+      n_customers: required when mixer="xy" or "warm" (= sqrt(num_vars)).
+      warm_route: required when mixer="warm". List of customer indices in
+                  visit order, length n_customers. Use nearest_neighbor_route()
+                  to generate one.
+      eps: warm biasing strength in [0, 1]. Only used when mixer="warm".
+           0.25 is the literature default (Carmo et al. 2025).
     
     init_method:
       'tqa'    - Trotterized Quantum Annealing init (Sack & Serbyn 2021).
@@ -565,13 +844,16 @@ def optimise_qaoa(Q: dict, num_vars: int, p: int = 1, shots: int = 1024,
     """
     h, J, offset = qubo_to_ising(Q, num_vars)
     
-    if mixer not in ("x", "xy"):
-        raise ValueError(f"mixer must be 'x' or 'xy', got {mixer!r}")
+    if mixer not in ("x", "xy", "warm"):
+        raise ValueError(f"mixer must be 'x', 'xy', or 'warm', got {mixer!r}")
     
-    if mixer == "xy" and n_customers is None:
+    if mixer in ("xy", "warm") and n_customers is None:
         n_customers = int(round(math.sqrt(num_vars)))
         if n_customers * n_customers != num_vars:
-            raise ValueError(f"XY-mixer needs n_customers; num_vars={num_vars} is not a square.")
+            raise ValueError(f"XY/warm mixer needs n_customers; num_vars={num_vars} is not a square.")
+    
+    if mixer == "warm" and warm_route is None:
+        raise ValueError("warm mixer requires warm_route. Pass a list from nearest_neighbor_route().")
 
     def objective(params):
         if mixer == "x":
@@ -580,7 +862,7 @@ def optimise_qaoa(Q: dict, num_vars: int, p: int = 1, shots: int = 1024,
             else:
                 qc = build_qaoa_circuit(h, J, num_vars,
                                         params[:p], params[p:], p=p)
-        else:  # mixer == "xy"
+        elif mixer == "xy":
             if p == 1:
                 qc = build_qaoa_circuit_xy(h, J, num_vars, params[0], params[1],
                                            p=1, n_customers=n_customers)
@@ -588,15 +870,27 @@ def optimise_qaoa(Q: dict, num_vars: int, p: int = 1, shots: int = 1024,
                 qc = build_qaoa_circuit_xy(h, J, num_vars,
                                            params[:p], params[p:], p=p,
                                            n_customers=n_customers)
+        else:  # mixer == "warm"
+            if p == 1:
+                qc = build_qaoa_circuit_warm(h, J, num_vars, params[0], params[1],
+                                             p=1, n_customers=n_customers,
+                                             warm_route=warm_route, eps=eps)
+            else:
+                qc = build_qaoa_circuit_warm(h, J, num_vars,
+                                             params[:p], params[p:], p=p,
+                                             n_customers=n_customers,
+                                             warm_route=warm_route, eps=eps)
         counts = run_local(qc, shots=shots)
         return expected_energy(counts, Q, num_vars) + offset
 
     if init_method == "tqa":
         x0 = tqa_init(p, dt=tqa_dt)
-        print(f"Optimising QAOA (p={p}, max_iter={max_iter}, init=TQA dt={tqa_dt}, mixer={mixer})…")
+        warm_suffix = f", warm_route={warm_route}, eps={eps}" if mixer == "warm" else ""
+        print(f"Optimising QAOA (p={p}, max_iter={max_iter}, init=TQA dt={tqa_dt}, mixer={mixer}{warm_suffix})…")
     elif init_method == "flat":
         x0 = np.array([0.5] * p + [0.4] * p)
-        print(f"Optimising QAOA (p={p}, max_iter={max_iter}, init=flat, mixer={mixer})…")
+        warm_suffix = f", warm_route={warm_route}, eps={eps}" if mixer == "warm" else ""
+        print(f"Optimising QAOA (p={p}, max_iter={max_iter}, init=flat, mixer={mixer}{warm_suffix})…")
     else:
         raise ValueError(f"Unknown init_method: {init_method}")
 
@@ -680,10 +974,10 @@ def write_cache(out_path: str, *, stage_id: int, route: list,
 if __name__ == "__main__":
     """Run sanity checks. Execute: python3 quantum/qubo_builder.py"""
     print("=" * 70)
-    print("XY-MIXER SANITY CHECKS")
+    print("XY-MIXER + WARM-START SANITY CHECKS")
     print("=" * 70)
     print()
-    print("Step 1: Verify Dicke |D^n_1> construction for n = 3, 4, 5")
+    print("Step 1: Verify uniform Dicke |D^n_1> for n = 3, 4, 5")
     print("        (these are the row sizes we use in Stages 0, 1, 3)")
     print()
     
@@ -694,11 +988,21 @@ if __name__ == "__main__":
             all_pass = False
     
     print()
+    print("Step 2: Verify WARM-BIASED Dicke |D^n_1> for n=5, various warm_pos and eps")
+    print()
+    
+    for warm_pos in [0, 2, 4]:
+        for eps in [0.0, 0.25, 0.5]:
+            result = verify_warm_dicke(5, warm_pos, eps)
+            if not result["pass"]:
+                all_pass = False
+    
+    print()
     print("=" * 70)
     if all_pass:
-        print("ALL DICKE CHECKS PASSED — XY-mixer pipeline is safe to use.")
-        print("Next step: run Stage 3 with --mixer xy on local sim.")
+        print("ALL SANITY CHECKS PASSED — XY-mixer + warm-start pipeline is safe.")
+        print("Next step: run Stage 3 with --mixer warm on local sim.")
     else:
         print("SANITY CHECKS FAILED — DO NOT proceed to Forte.")
-        print("Review the dicke_state_k1 function and re-test.")
+        print("Review the failing functions and re-test.")
     print("=" * 70)

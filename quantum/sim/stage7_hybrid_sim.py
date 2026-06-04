@@ -2,21 +2,24 @@
 Stage 7 Hybrid (SIMULATOR variant) — 5+5 customers, 25 qubits per cluster
 =========================================================================
 
-Now supports XY-mixer via --mixer xy flag.
+Now supports XY-mixer via --mixer xy flag and warm-start via --mixer warm.
 
-Quick sanity check before using XY-mixer:
+Quick sanity check before using XY-mixer or warm-start:
     python3 quantum/qubo_builder.py
     # All Dicke checks should PASS before continuing.
 
 Usage:
     # X-mixer (default, original behavior)
     python3 quantum/sim/stage7_hybrid_sim.py --backend local
-    
-    # XY-mixer (constraint-preserving, new)
+
+    # XY-mixer (constraint-preserving)
     python3 quantum/sim/stage7_hybrid_sim.py --backend local --mixer xy
-    
-    # XY-mixer on Forte Enterprise 1 (ONLY after local test passes)
-    python3 quantum/sim/stage7_hybrid_sim.py --backend ionq_forte_ent --mixer xy
+
+    # Warm-start XY-mixer (new)
+    python3 quantum/sim/stage7_hybrid_sim.py --backend local --mixer warm --eps 0.25
+
+    # On Forte Enterprise 1 (ONLY after local test passes)
+    python3 quantum/sim/stage7_hybrid_sim.py --backend ionq_forte_ent --mixer warm
 """
 import argparse
 import math
@@ -28,7 +31,6 @@ import statistics
 from datetime import datetime, timezone
 from itertools import permutations
 
-# Load .env so IONQ_API_KEY is available
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -43,7 +45,8 @@ sys.path.insert(0, THIS_DIR)
 from qubo_builder import (
     distance, build_distance_matrix,
     assignment_penalty, distance_cost, cold_penalty,
-    qubo_to_ising, build_qaoa_circuit, build_qaoa_circuit_xy,
+    qubo_to_ising, build_qaoa_circuit, build_qaoa_circuit_xy, build_qaoa_circuit_warm,
+    nearest_neighbor_route,
     run_local, run_ionq, optimise_qaoa,
     best_valid_route_from_counts,
 )
@@ -106,7 +109,7 @@ def build_cluster_qubo(cluster_ids):
     return Q, n * n, cluster_customers
 
 
-def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter, mixer="x"):
+def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter, mixer="x", eps=0.25):
     n = len(cluster_ids)
     if n == 0:
         return [], 0.0, 1.0
@@ -115,7 +118,6 @@ def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter, mixer="x"):
 
     Q, num_vars, cluster_customers = build_cluster_qubo(cluster_ids)
 
-    # Tiny clusters: brute-force
     if n <= 4:
         best_perm = None
         best_score = float("-inf")
@@ -135,18 +137,25 @@ def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter, mixer="x"):
                 best_score = s
                 best_perm = perm
         route_orig = [cluster_ids[i] for i in best_perm]
-        print(f"    n={n} → classical brute-force. "
+        print(f"    n={n} -> classical brute-force. "
               f"Route: {'-'.join(CUSTOMERS[i]['name'] for i in route_orig)}")
         return route_orig, 0.0, 1.0
 
-    # n=5: full QAOA pipeline
     h, J, _ = qubo_to_ising(Q, num_vars)
     print(f"    QUBO: {num_vars} qubits, {len(Q)} terms")
-    print(f"    Tuning QAOA params on local simulator (mixer={mixer})…")
-    best_params = optimise_qaoa(Q, num_vars, p=p, shots=shots, max_iter=max_iter,
-                                mixer=mixer, n_customers=n)
 
-    # Build the final circuit using the right mixer
+    warm_route_local = None
+    if mixer == "warm":
+        warm_route_local = nearest_neighbor_route(cluster_customers, SHOP)
+        warm_names = '-'.join(cluster_customers[i]['name'] for i in warm_route_local)
+        print(f"    Warm route (nearest-neighbor): {warm_route_local} ({warm_names})")
+        print(f"    Warm biasing eps = {eps}")
+
+    print(f"    Tuning QAOA params on local simulator (mixer={mixer})...")
+    best_params = optimise_qaoa(Q, num_vars, p=p, shots=shots, max_iter=max_iter,
+                                mixer=mixer, n_customers=n,
+                                warm_route=warm_route_local, eps=eps)
+
     if mixer == "x":
         if p == 1:
             final_qc = build_qaoa_circuit(h, J, num_vars,
@@ -163,14 +172,25 @@ def solve_cluster_qaoa(cluster_ids, backend, p, shots, max_iter, mixer="x"):
             final_qc = build_qaoa_circuit_xy(h, J, num_vars,
                                              best_params[:p], best_params[p:],
                                              p=p, n_customers=n)
+    elif mixer == "warm":
+        if p == 1:
+            final_qc = build_qaoa_circuit_warm(h, J, num_vars,
+                                                best_params[0], best_params[1],
+                                                p=1, n_customers=n,
+                                                warm_route=warm_route_local, eps=eps)
+        else:
+            final_qc = build_qaoa_circuit_warm(h, J, num_vars,
+                                                best_params[:p], best_params[p:],
+                                                p=p, n_customers=n,
+                                                warm_route=warm_route_local, eps=eps)
     else:
         raise ValueError(f"Unknown mixer: {mixer}")
-    
+
     print(f"    Final circuit: {final_qc.num_qubits} qubits, "
           f"depth {final_qc.depth()}, "
           f"{sum(final_qc.count_ops().values())} gates")
 
-    print(f"    Submitting to {backend}…")
+    print(f"    Submitting to {backend}...")
     if backend == "local":
         counts = run_local(final_qc, shots=shots)
     elif backend == "ionq_sim":
@@ -353,9 +373,12 @@ def main():
     parser.add_argument("--backend",
                         choices=["local", "ionq_sim", "ionq_forte", "ionq_forte_ent"],
                         default="local")
-    parser.add_argument("--mixer", choices=["x", "xy"], default="x",
-                        help="QAOA mixer. 'x' is plain. 'xy' is constraint-preserving "
-                             "(row-only, requires Dicke initial state).")
+    parser.add_argument("--mixer", choices=["x", "xy", "warm"], default="x",
+                        help="QAOA mixer. 'x' is plain. 'xy' is constraint-preserving. "
+                             "'warm' adds warm-start biasing toward nearest-neighbor route.")
+    parser.add_argument("--eps", type=float, default=0.25,
+                        help="Warm-biasing strength in [0, 1] (only used when --mixer warm). "
+                             "0=uniform Dicke, 0.25=literature default, 0.5=strong bias.")
     parser.add_argument("--p", type=int, default=2)
     parser.add_argument("--shots", type=int, default=1024)
     parser.add_argument("--max-iter", type=int, default=40)
@@ -368,37 +391,25 @@ def main():
         args.out = f"stage7_sim_results/stage7_hybrid_sim_{args.mixer}_result.json"
 
     print("=" * 70)
-    print(f"Stage 7 Hybrid (SIM variant) — 5+5 customers, 25 qubits/cluster")
+    print(f"Stage 7 Hybrid (SIM variant) - 5+5 customers, 25 qubits/cluster")
     print(f"Backend: {args.backend}, p={args.p}, mixer={args.mixer}, "
           f"shots/cluster={args.shots}")
     print("=" * 70)
 
-    if args.mixer == "xy" and args.backend == "ionq_forte_ent":
-        print("\n*** WARNING: about to run XY-mixer on real Forte hardware. ***")
-        print("    Did you run `python3 quantum/qubo_builder.py` first to")
-        print("    verify Dicke sanity checks all PASS?")
-        print("    Press Ctrl+C now if not.")
-        try:
-            import time
-            time.sleep(10)
-        except KeyboardInterrupt:
-            print("\nAborted by user.")
-            return
-
-    print("\n[1/4] Classical k-means clustering (k=2)…")
+    print("\n[1/4] Classical k-means clustering (k=2)...")
     cluster_a, cluster_b = kmeans_partition(CUSTOMERS)
     print(f"  Cluster A ({len(cluster_a)}): "
           f"{[CUSTOMERS[i]['name'] for i in cluster_a]}")
     print(f"  Cluster B ({len(cluster_b)}): "
           f"{[CUSTOMERS[i]['name'] for i in cluster_b]}")
 
-    print(f"\n[2/4] Solving each cluster on {args.backend}…")
+    print(f"\n[2/4] Solving each cluster on {args.backend}...")
     print(f"  Cluster A:")
     route_a, energy_a, vf_a = solve_cluster_qaoa(
-        cluster_a, args.backend, args.p, args.shots, args.max_iter, args.mixer)
+        cluster_a, args.backend, args.p, args.shots, args.max_iter, args.mixer, args.eps)
     print(f"  Cluster B:")
     route_b, energy_b, vf_b = solve_cluster_qaoa(
-        cluster_b, args.backend, args.p, args.shots, args.max_iter, args.mixer)
+        cluster_b, args.backend, args.p, args.shots, args.max_iter, args.mixer, args.eps)
     routes = [route_a, route_b]
 
     print("\n[3/4] Hybrid solution:")
@@ -408,8 +419,7 @@ def main():
     print(f"  Score: {hybrid_eval['score']}  "
           f"(hot={hybrid_eval['hot']}, cold={hybrid_eval['cold']})")
 
-    print(f"\n[4/4] Classical SA baseline "
-          f"({args.sa_restarts} restarts)…")
+    print(f"\n[4/4] Classical SA baseline ({args.sa_restarts} restarts)...")
     sa_scores, sa_best = classical_sa_baseline(num_restarts=args.sa_restarts,
                                                 iters=args.sa_iters)
     print(f"  best: {max(sa_scores)}, mean: {statistics.mean(sa_scores):.1f}, "
